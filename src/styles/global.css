@@ -1,0 +1,80 @@
+@import 'tailwindcss';
+@import '@fontsource-variable/montserrat';
+
+/* -----------------------------------------------------------------------------
+ * Tokens Speak Easy: morado #41276B y fucsia #FF327D son los confirmados de
+ * marca; el resto son tonos derivados para superficies, texto y bordes.
+ * ---------------------------------------------------------------------------*/
+@theme {
+  --font-sans: 'Montserrat Variable', Montserrat, Arial, ui-sans-serif, system-ui, sans-serif;
+
+  --color-morado: #41276b;
+  --color-morado-oscuro: #2c1a4a;
+  --color-rosa: #ff327d;
+  /* Fucsia para texto pequeño sobre blanco: #FF327D no llega a 4.5:1. */
+  --color-rosa-texto: #c0135a;
+  --color-lila: #f4f0fa;
+  --color-lila-borde: #e4dcf0;
+
+  --color-tinta: #1f1a2e;
+  --color-tinta-2: #4b4760;
+  --color-tenue: #6f6a80;
+  --color-linea: #ece9f2;
+  --color-sube: #0a7a33;
+  --color-baja: #b42318;
+}
+
+:root {
+  color-scheme: light;
+}
+
+body {
+  background: #f7f5fb;
+  color: var(--color-tinta);
+}
+
+button:not(:disabled) {
+  cursor: pointer;
+}
+
+/* Paneles blancos con borde suave, como las tarjetas de inventario. */
+.panel {
+  @apply rounded-2xl border border-linea bg-white p-4 shadow-sm sm:p-5;
+}
+
+/* Control segmentado (Acumulado / Por día). */
+.segmento {
+  @apply inline-flex rounded-lg bg-lila p-0.5 text-xs font-semibold;
+}
+.segmento button {
+  @apply rounded-md px-2.5 py-1.5 text-tinta-2 transition-colors;
+}
+.segmento button[aria-pressed='true'] {
+  @apply bg-white text-morado shadow-sm;
+}
+.segmento button:focus-visible,
+.foco:focus-visible {
+  @apply outline-2 outline-offset-2 outline-rosa;
+}
+
+/* Barra de scroll horizontal verde, como las tablas de Métricas. */
+.scroll-verde {
+  scrollbar-color: #6ee7b7 #ecfdf5;
+  scrollbar-width: thin;
+}
+.scroll-verde::-webkit-scrollbar {
+  height: 8px;
+}
+.scroll-verde::-webkit-scrollbar-track {
+  background: #ecfdf5;
+  border-radius: 999px;
+}
+.scroll-verde::-webkit-scrollbar-thumb {
+  background: #6ee7b7;
+  border-radius: 999px;
+}
+
+/* Deslizador del día de comparación. */
+input[type='range'].deslizador {
+  accent-color: var(--color-morado);
+}

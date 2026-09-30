@@ -1,11 +1,218 @@
 ---
-import Welcome from '../components/Welcome.astro';
 import Layout from '../layouts/Layout.astro';
+import { cargarComparativa } from '../lib/lanzamientos';
+import { fmtFechaLarga } from '../lib/formato';
+import type { DatosComparativa } from '../lib/tipos';
 
-// Welcome to Astro! Wondering what to do next? Check out the Astro documentation at https://docs.astro.build
-// Don't want to use any of this? Delete everything in this file, the `assets`, `components`, and `layouts` directories, and start fresh.
+let datos: DatosComparativa | null = null;
+try {
+  datos = await cargarComparativa();
+  // Las métricas se cargan una vez al día: 2 minutos de caché en el CDN
+  // bastan y evitan consultar la base en cada visita.
+  Astro.response.headers.set('Cache-Control', 'public, s-maxage=120, stale-while-revalidate=600');
+} catch (error) {
+  console.error('[comparativa] no se pudieron leer los lanzamientos:', error);
+  Astro.response.status = 503;
+}
+
+// `<` escapado para que ningún nombre pueda cerrar la etiqueta script de datos.
+const json = datos ? JSON.stringify(datos).replace(/</g, '\\u003c') : '';
+const hayDatos = !!datos?.lanzamientos.some((l) => l.registros.length > 0 || l.inversion.puntos.length > 0);
 ---
 
-<Layout>
-	<Welcome />
+<Layout titulo="Comparativa de lanzamientos · Speak Easy">
+  <header class="bg-morado text-white">
+    <div class="mx-auto flex max-w-7xl flex-wrap items-center gap-x-5 gap-y-3 px-4 py-5 sm:px-6">
+      <img src="/img/logo-speakeasy.webp" alt="Speak Easy" width="393" height="201" class="h-10 w-auto" />
+      <div class="min-w-0 flex-1">
+        <h1 class="text-xl font-bold sm:text-2xl">Comparativa de lanzamientos</h1>
+        <p class="text-sm text-white/80">
+          Registros e inversión día a día, alineados a la Clase 1 de cada lanzamiento.
+        </p>
+      </div>
+      {
+        datos && (
+          <p class="w-full text-xs text-white/80 sm:w-auto">
+            Hoy: <span class="font-semibold text-white">{fmtFechaLarga(datos.hoy)}</span>
+          </p>
+        )
+      }
+    </div>
+  </header>
+
+  <main class="mx-auto max-w-7xl space-y-5 px-4 py-6 sm:px-6">
+    {
+      !datos && (
+        <div class="panel text-center">
+          <p class="font-semibold">No se pudo leer la base de datos.</p>
+          <p class="mt-1 text-sm text-tenue">Revisa la variable DATABASE_URL y vuelve a cargar la página.</p>
+        </div>
+      )
+    }
+    {
+      datos && !hayDatos && (
+        <div class="panel text-center">
+          <p class="font-semibold">Aún no hay métricas registradas.</p>
+          <p class="mt-1 text-sm text-tenue">
+            Cuando un lanzamiento tenga registros o inversión en inventario, aparecerá aquí.
+          </p>
+        </div>
+      )
+    }
+
+    {
+      datos && hayDatos && (
+        <>
+          {/* Selección de lanzamientos y día de comparación */}
+          <section class="panel space-y-4" aria-labelledby="t-seleccion">
+            <div class="flex flex-wrap items-baseline justify-between gap-2">
+              <h2 id="t-seleccion" class="text-sm font-bold text-tinta">Lanzamientos a comparar</h2>
+              <p class="text-xs text-tenue">El día 0 es la Clase 1. D-6 = seis días antes.</p>
+            </div>
+            <div id="lanzamientos" class="grid grid-cols-1 gap-3 sm:grid-cols-2 lg:grid-cols-3" />
+
+            <div class="border-t border-linea pt-4">
+              <div class="flex flex-wrap items-center justify-between gap-2">
+                <label for="dia" class="text-sm font-bold text-tinta">
+                  Comparar en el día <span id="dia-etiqueta" class="text-morado" />
+                </label>
+                <button
+                  id="dia-ultimo"
+                  type="button"
+                  class="foco rounded-lg border border-lila-borde px-2.5 py-1 text-xs font-semibold text-morado hover:bg-lila"
+                >
+                  Ir al último dato
+                </button>
+              </div>
+              <input id="dia" type="range" step="1" class="deslizador mt-3 w-full" />
+              <p id="dia-detalle" class="mt-1 text-xs text-tinta-2" />
+            </div>
+          </section>
+
+          {/* Resumen y KPIs en el día comparado */}
+          <section aria-label="Resumen" class="space-y-4">
+            <div id="resumen" class="panel" />
+            <div id="kpis" class="grid grid-cols-1 gap-3 sm:grid-cols-2 lg:grid-cols-4" />
+            <div id="cierre" />
+          </section>
+
+          {/* Gráficas */}
+          <section class="grid grid-cols-1 gap-4 lg:grid-cols-2" aria-label="Gráficas">
+            <article class="panel min-w-0" aria-labelledby="t-g-registros">
+              <header class="flex flex-wrap items-start justify-between gap-2">
+                <div>
+                  <h2 id="t-g-registros" class="text-sm font-bold">Registros</h2>
+                  <p class="text-xs text-tenue" data-sub="registros" />
+                </div>
+                <div class="segmento" role="group" aria-label="Vista de registros" data-control="vistaRegistros">
+                  <button type="button" data-valor="acumulado">Acumulado</button>
+                  <button type="button" data-valor="diario">Por día</button>
+                </div>
+              </header>
+              <div class="mt-3 flex flex-wrap gap-x-4 gap-y-1" data-leyenda />
+              <div class="relative mt-2 h-72">
+                <canvas id="g-registros" role="img" aria-label="Registros por día alineados a la Clase 1" />
+              </div>
+            </article>
+
+            <article class="panel min-w-0" aria-labelledby="t-g-inversion">
+              <header class="flex flex-wrap items-start justify-between gap-2">
+                <div>
+                  <h2 id="t-g-inversion" class="text-sm font-bold">Inversión</h2>
+                  <p class="text-xs text-tenue" data-sub="inversion" />
+                </div>
+                <div class="segmento" role="group" aria-label="Vista de inversión" data-control="vistaInversion">
+                  <button type="button" data-valor="acumulado">Acumulada</button>
+                  <button type="button" data-valor="diario">Por día</button>
+                </div>
+              </header>
+              <div class="mt-3 flex flex-wrap gap-x-4 gap-y-1" data-leyenda />
+              <div class="relative mt-2 h-72">
+                <canvas id="g-inversion" role="img" aria-label="Inversión por día alineada a la Clase 1" />
+              </div>
+            </article>
+
+            <article class="panel min-w-0" aria-labelledby="t-g-costo">
+              <header>
+                <h2 id="t-g-costo" class="text-sm font-bold">Costo por registro de pauta</h2>
+                <p class="text-xs text-tenue">Inversión acumulada ÷ registros acumulados de pauta. Más bajo es mejor.</p>
+              </header>
+              <div class="mt-3 flex flex-wrap gap-x-4 gap-y-1" data-leyenda />
+              <div class="relative mt-2 h-72">
+                <canvas id="g-costo" role="img" aria-label="Costo por registro de pauta alineado a la Clase 1" />
+              </div>
+            </article>
+
+            <article class="panel min-w-0" aria-labelledby="t-g-fuentes">
+              <header>
+                <h2 id="t-g-fuentes" class="text-sm font-bold">Registros por fuente</h2>
+                <p class="text-xs text-tenue" data-sub="fuentes" />
+              </header>
+              <div class="mt-3 flex flex-wrap gap-x-4 gap-y-1" data-leyenda />
+              <div class="relative mt-2 h-72">
+                <canvas id="g-fuentes" role="img" aria-label="Registros acumulados por fuente en el día comparado" />
+              </div>
+            </article>
+          </section>
+
+          {/* Tabla día a día */}
+          <section class="panel" aria-labelledby="t-tabla-dias">
+            <header class="flex flex-wrap items-start justify-between gap-2">
+              <div>
+                <h2 id="t-tabla-dias" class="text-sm font-bold">Día a día, alineado a la Clase 1</h2>
+                <p class="text-xs text-tenue">
+                  Valores tal como se registraron. La columna sombreada es el día comparado; toca un día para
+                  compararlo.
+                </p>
+              </div>
+              <div class="segmento" role="group" aria-label="Vista de la tabla" data-control="vistaTabla">
+                <button type="button" data-valor="acumulado">Acumulado</button>
+                <button type="button" data-valor="diario">Por día</button>
+              </div>
+            </header>
+            <div id="tabla-dias" class="scroll-verde mt-3 overflow-x-auto rounded-xl border border-lila-borde" />
+          </section>
+
+          {/* Fuentes y captación paga */}
+          <section class="grid grid-cols-1 gap-4 lg:grid-cols-2">
+            <article class="panel min-w-0" aria-labelledby="t-tabla-fuentes">
+              <h2 id="t-tabla-fuentes" class="text-sm font-bold">Fuentes de registro</h2>
+              <p class="text-xs text-tenue" data-sub="tabla-fuentes" />
+              <div id="tabla-fuentes" class="scroll-verde mt-3 overflow-x-auto rounded-xl border border-lila-borde" />
+            </article>
+            <article class="panel min-w-0" aria-labelledby="t-plataformas">
+              <h2 id="t-plataformas" class="text-sm font-bold">Captación paga por plataforma</h2>
+              <p class="text-xs text-tenue" data-sub="plataformas" />
+              <div id="plataformas" class="mt-3 space-y-4" />
+            </article>
+          </section>
+
+          <footer class="space-y-1 pb-4 text-xs text-tenue">
+            <p>
+              <strong class="text-tinta-2">Fuente:</strong> módulo Lanzamientos de inventario (tablas de Métricas y
+              Captación paga). Esta página solo lee la base de datos.
+            </p>
+            <p>
+              <strong class="text-tinta-2">Registros:</strong> total acumulado de todas las fuentes. "Pauta" agrupa las
+              fuentes pagas (PAUTA, RSS, …); el resto es orgánico.
+            </p>
+            <p>
+              <strong class="text-tinta-2">Inversión:</strong> si el lanzamiento tiene la tabla de Captación paga, se
+              suma por plataforma; si no, se usa la inversión acumulada registrada.
+            </p>
+            <p>
+              <strong class="text-tinta-2">Días sin registro:</strong> "≈" indica un valor estimado entre los días
+              vecinos. En las gráficas por día, lo cargado tras varios días sin registro se reparte en partes iguales.
+            </p>
+          </footer>
+
+          <script is:inline type="application/json" id="datos-comparativa" set:html={json} />
+        </>
+      )
+    }
+  </main>
 </Layout>
+
+<script>
+  import '../scripts/comparativa.ts';
+</script>
