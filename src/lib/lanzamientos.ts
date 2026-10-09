@@ -1,5 +1,6 @@
 import { consultar } from './db';
-import { diasEntre, hoyColombia } from './fechas';
+import { diasEntre, hoyColombia, sumarDias } from './fechas';
+import { VENTAS_POR_LANZAMIENTO, type TipoVenta } from './productos-lanzamiento';
 import type {
   DatosComparativa,
   EstadoLanzamiento,
@@ -8,6 +9,7 @@ import type {
   Plataforma,
   PuntoInversion,
   PuntoRegistros,
+  SerieVentas,
 } from './tipos';
 
 /*
@@ -21,6 +23,12 @@ import type {
  *   fuentes_metrica2     ─┐ registros e inversión DIARIOS por plataforma paga
  *   registros_metrica2   ─┘ (la tabla "Captación paga")
  *   registros_inversion     gasto ACUMULADO por día (tabla anterior a "Captación paga")
+ *
+ * Y del módulo Cartera, para las ventas:
+ *
+ *   cartera_productos       nombre del producto
+ *   cartera_compras       ─┐ cada compra y sus pagos; la relación con el
+ *   cartera_compras_pagos ─┘ lanzamiento está en `productos-lanzamiento.ts`
  */
 
 // ---------------------------------------------------------------------------
@@ -82,11 +90,60 @@ interface FilaRegistro2 {
   valor: number | null;
   inversion: number | null;
 }
+interface FilaProducto {
+  id: string;
+  nombre: string;
+}
+interface FilaVentas {
+  producto_id: string;
+  fecha: string;
+  ventas: number;
+}
+interface FilaCobro {
+  producto_id: string;
+  fecha: string;
+  centavos: number | null;
+}
+
+/** Ventas y cobros de los productos de Cartera asociados a algún lanzamiento. */
+function consultarCartera() {
+  const ids = [
+    ...new Set(Object.values(VENTAS_POR_LANZAMIENTO).flatMap((v) => [...v.ventas.productos, ...v.downsell.productos])),
+  ];
+  return Promise.all([
+    consultar<FilaProducto>(`select id, nombre from cartera_productos where id = any($1::uuid[])`, [ids]),
+    // La venta cuenta el día de su primer pago: `created_at` no sirve porque las
+    // compras de marzo se cargaron todas juntas en junio, al crear Cartera.
+    consultar<FilaVentas>(
+      `
+      select producto_id, fecha::text as fecha, count(*)::int as ventas
+        from (select c.producto_id, min(p.fecha_pago) as fecha
+                from cartera_compras c
+                join cartera_compras_pagos p on p.compra_id = c.id
+               where c.producto_id = any($1::uuid[])
+               group by c.id, c.producto_id) primeras
+       where fecha is not null
+       group by producto_id, fecha
+       order by fecha`,
+      [ids],
+    ),
+    consultar<FilaCobro>(
+      `
+      select c.producto_id, p.fecha_pago::text as fecha, sum(p.ingresado_usd * 100)::float8 as centavos
+        from cartera_compras_pagos p
+        join cartera_compras c on c.id = p.compra_id
+       where c.producto_id = any($1::uuid[]) and p.fecha_pago is not null
+       group by c.producto_id, p.fecha_pago
+       order by fecha`,
+      [ids],
+    ),
+  ]);
+}
 
 export async function cargarComparativa(): Promise<DatosComparativa> {
   // Las fechas salen como texto: el tipo DATE de pg se convierte a Date en la
   // zona del servidor y puede correrse un día.
-  const [lanzamientos, fuentes, registros, inversiones, plataformas, registros2] = await Promise.all([
+  const [lanzamientos, fuentes, registros, inversiones, plataformas, registros2, cartera] = await Promise.all([
     consultar<FilaLanzamiento>(`
       select l.id, l.nombre, l.fecha::text as fecha, l.moneda_inversion as moneda,
              (select max(c.fecha)::text from clases_lanzamiento c where c.lanzamiento_id = l.id) as ultima_clase
@@ -102,7 +159,10 @@ export async function cargarComparativa(): Promise<DatosComparativa> {
       select id, lanzamiento_id, nombre from fuentes_metrica2 order by orden, created_at`),
     consultar<FilaRegistro2>(`
       select fuente_id, fecha::text as fecha, valor, inversion from registros_metrica2 order by fecha`),
+    consultarCartera(),
   ]);
+  const [productos, ventas, cobros] = cartera;
+  const nombreProducto = new Map(productos.map((p) => [p.id, p.nombre]));
 
   const hoy = hoyColombia();
   const fuentesVistas = new Map<string, Omit<FuenteCanonica, 'orden'>>();
@@ -129,6 +189,11 @@ export async function cargarComparativa(): Promise<DatosComparativa> {
     );
 
     const clavesPresentes = new Set([...canonDe.values()].map((c) => c.clave));
+    const estado = estadoDe(l, hoy, puntosRegistros.length > 0);
+
+    const config = VENTAS_POR_LANZAMIENTO[l.id];
+    const serie = (tipo: TipoVenta | undefined) =>
+      armarVentas(l.fecha, tipo ?? { productos: [] }, { ventas, cobros, nombreProducto, hoy, estado });
 
     return {
       id: l.id,
@@ -136,12 +201,14 @@ export async function cargarComparativa(): Promise<DatosComparativa> {
       fecha: l.fecha,
       moneda: l.moneda || 'USD',
       color: indice,
-      estado: estadoDe(l, hoy, puntosRegistros.length > 0),
+      estado,
       diaHoy: diasEntre(l.fecha, hoy),
       fuentes: ordenarFuentes([...clavesPresentes].map((c) => fuentesVistas.get(c)!)),
       registros: puntosRegistros,
       inversion,
       plataformas: listaPlataformas,
+      ventas: serie(config?.ventas),
+      downsell: serie(config?.downsell),
     };
   });
 
@@ -222,6 +289,70 @@ function armarInversion(
   }
 
   return { origen: null, puntos: [] };
+}
+
+/**
+ * Ventas y cobrado acumulados de un tipo de venta, un punto por día desde la
+ * primera venta. Al ser continua, ningún día se interpola: un día sin ventas
+ * vale lo mismo que el anterior.
+ *
+ * Llega hasta el cierre de la ventana (sin pasar de hoy). Sin cierre, hasta
+ * hoy mientras el lanzamiento sigue en curso, o hasta la última venta.
+ */
+function armarVentas(
+  fechaLanzamiento: string,
+  tipo: TipoVenta,
+  contexto: {
+    ventas: FilaVentas[];
+    cobros: FilaCobro[];
+    nombreProducto: Map<string, string>;
+    hoy: string;
+    estado: EstadoLanzamiento;
+  },
+): SerieVentas {
+  const { hoy } = contexto;
+  const cierre = tipo.cierre ?? null;
+  const ventas = contexto.ventas.filter((v) => tipo.productos.includes(v.producto_id));
+  const dentro = cierre ? ventas.filter((v) => v.fecha <= cierre) : ventas;
+  const serie: SerieVentas = {
+    // Un id que no está en Cartera se muestra tal cual, para notar el error.
+    productos: tipo.productos.map((id) => contexto.nombreProducto.get(id) ?? id),
+    cierre,
+    cerrada: cierre ? hoy > cierre : contexto.estado === 'finalizado',
+    puntos: [],
+    fueraDeVentana: ventas.reduce((s, v) => s + v.ventas, 0) - dentro.reduce((s, v) => s + v.ventas, 0),
+  };
+  if (dentro.length === 0) return serie;
+
+  const ventasDia = new Map<string, number>();
+  for (const v of dentro) ventasDia.set(v.fecha, (ventasDia.get(v.fecha) ?? 0) + v.ventas);
+  // Los cobros de las compras fuera de ventana caen después del cierre, donde la serie ya terminó.
+  const cobradoDia = new Map<string, number>();
+  for (const c of contexto.cobros) {
+    if (tipo.productos.includes(c.producto_id)) {
+      cobradoDia.set(c.fecha, (cobradoDia.get(c.fecha) ?? 0) + (c.centavos ?? 0));
+    }
+  }
+
+  const fechas = [...ventasDia.keys()].sort();
+  const ultima = fechas[fechas.length - 1];
+  const fin = cierre ?? (serie.cerrada ? ultima : hoy);
+  const tope = fin < hoy ? fin : hoy;
+  const hasta = tope > ultima ? tope : ultima;
+
+  let totalVentas = 0;
+  let totalCobrado = 0;
+  for (let fecha = fechas[0]; fecha <= hasta; fecha = sumarDias(fecha, 1)) {
+    totalVentas += ventasDia.get(fecha) ?? 0;
+    totalCobrado += cobradoDia.get(fecha) ?? 0;
+    serie.puntos.push({
+      dia: diasEntre(fechaLanzamiento, fecha),
+      fecha,
+      ventas: totalVentas,
+      cobrado: Math.round(totalCobrado),
+    });
+  }
+  return serie;
 }
 
 function estadoDe(l: FilaLanzamiento, hoy: string, tieneDatos: boolean): EstadoLanzamiento {

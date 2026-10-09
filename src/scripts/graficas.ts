@@ -87,8 +87,9 @@ const marcas: Plugin = {
     if (!opciones) return;
     const { ctx, chartArea } = chart;
     // Tinta neutra: el morado y el fucsia ya identifican lanzamientos.
-    // Las etiquetas van arriba, a la izquierda de su línea; si una pisa a la
-    // anterior (gráfica angosta), baja al pie del área de datos.
+    // Las etiquetas van arriba, a la izquierda de su línea (a la derecha si
+    // no caben, p. ej. la Clase 1 al inicio del eje de ventas); si una pisa a
+    // la anterior (gráfica angosta), baja al pie del área de datos.
     let limiteIzquierdo = Infinity;
     const linea = (indice: number, texto: string, discontinua: boolean) => {
       const x = Math.round(chart.scales.x.getPixelForValue(indice)) + 0.5;
@@ -101,18 +102,19 @@ const marcas: Plugin = {
       ctx.lineTo(x, chartArea.bottom);
       ctx.stroke();
       ctx.font = `600 11px ${FUENTE}`;
-      ctx.textAlign = 'right';
       ctx.textBaseline = 'bottom';
       const ancho = ctx.measureText(texto).width;
+      const derecha = x - 4 - ancho < chartArea.left;
+      ctx.textAlign = derecha ? 'left' : 'right';
       const arriba = x - 4 < limiteIzquierdo - 6;
       const y = arriba ? chartArea.top - 4 : chartArea.bottom - 4;
       if (!arriba) {
         ctx.fillStyle = 'rgba(255, 255, 255, 0.9)';
-        ctx.fillRect(x - 8 - ancho, y - 14, ancho + 6, 14);
+        ctx.fillRect(derecha ? x + 2 : x - 8 - ancho, y - 14, ancho + 6, 14);
       }
       ctx.fillStyle = TINTA.secundaria;
-      ctx.fillText(texto, x - 4, y);
-      if (arriba) limiteIzquierdo = Math.min(limiteIzquierdo, x - 4 - ancho);
+      ctx.fillText(texto, derecha ? x + 4 : x - 4, y);
+      if (arriba) limiteIzquierdo = Math.min(limiteIzquierdo, derecha ? x : x - 4 - ancho);
       ctx.restore();
     };
     if (opciones.clase1 != null) linea(opciones.clase1, 'Clase 1', false);

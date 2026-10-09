@@ -48,6 +48,33 @@ export interface Plataforma {
   puntos: PuntoPlataforma[];
 }
 
+/** Ventas y cobrado ACUMULADOS hasta un día. */
+export interface PuntoVentas {
+  dia: number;
+  fecha: string;
+  /** Compras cuyo primer pago cae hasta este día. */
+  ventas: number;
+  /** Lo cobrado hasta este día (cuotas incluidas), en centavos de USD. */
+  cobrado: number;
+}
+
+/**
+ * Ventas de un tipo (las del lanzamiento o las del downsell), de los
+ * productos de Cartera asociados en productos-lanzamiento.ts.
+ */
+export interface SerieVentas {
+  /** Nombres de los productos. */
+  productos: string[];
+  /** Último día de la ventana de ventas ('YYYY-MM-DD'), si se definió. */
+  cierre: string | null;
+  /** La ventana ya terminó: después del último punto vale el total final. */
+  cerrada: boolean;
+  /** Continua desde la primera venta: un día sin ventas repite el acumulado. */
+  puntos: PuntoVentas[];
+  /** Compras con primer pago después del cierre: no entran en `puntos`. */
+  fueraDeVentana: number;
+}
+
 /**
  * De dónde sale la inversión del lanzamiento:
  * - 'plataformas': tabla "Captación paga" (valores diarios por plataforma).
@@ -72,6 +99,8 @@ export interface Lanzamiento {
   registros: PuntoRegistros[];
   inversion: { origen: OrigenInversion; puntos: PuntoInversion[] };
   plataformas: Plataforma[];
+  ventas: SerieVentas;
+  downsell: SerieVentas;
 }
 
 export interface DatosComparativa {

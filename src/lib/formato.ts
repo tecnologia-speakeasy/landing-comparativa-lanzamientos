@@ -1,12 +1,19 @@
 /** Formatos es-CO, los mismos que usa la tabla de Métricas de inventario. */
 
 const enteros = new Intl.NumberFormat('es-CO', { maximumFractionDigits: 0 });
+const decimal = new Intl.NumberFormat('es-CO', { maximumFractionDigits: 1 });
 const porcentaje = new Intl.NumberFormat('es-CO', { style: 'percent', maximumFractionDigits: 1 });
+// Las conversiones rondan el 1 %: con un decimal no se distinguen.
+const tasa = new Intl.NumberFormat('es-CO', { style: 'percent', minimumFractionDigits: 2, maximumFractionDigits: 2 });
 const compacto = new Intl.NumberFormat('es-CO', { notation: 'compact', maximumFractionDigits: 1 });
 
 export const fmtNumero = (n: number) => enteros.format(n);
 export const fmtCompacto = (n: number) => compacto.format(n);
 export const fmtPorcentaje = (n: number) => porcentaje.format(n);
+/** 0.00547 → "0,55 %". */
+export const fmtTasa = (n: number) => tasa.format(n);
+/** 3.21 → "3,2×". */
+export const fmtVeces = (n: number) => `${decimal.format(n)}×`;
 
 const cacheMoneda = new Map<string, Intl.NumberFormat>();
 function formatoMoneda(moneda: string, decimales: number) {

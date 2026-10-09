@@ -15,25 +15,40 @@ import {
   fmtMonedaCompacta,
   fmtNumero,
   fmtPorcentaje,
+  fmtTasa,
   fmtVariacion,
+  fmtVeces,
 } from '../lib/formato';
 import {
+  cobradoDownsellEn,
+  cobradoEn,
+  cobradoTotalEn,
+  conversionEn,
   costoPorRegistroEn,
+  costoPorVentaEn,
   diaCierre,
   diarioRepartido,
+  downsellEn,
   fuenteEn,
   incrementos,
   inversionEn,
   organicoEn,
   pautaEn,
   plataformaHasta,
+  rangoCaptacionDe,
   rangoDe,
+  rangoDownsellDe,
+  rangoVentasDe,
   registrosEn,
+  retornoEn,
+  ventasEn,
+  ventasTotalesEn,
   type Incremento,
+  type Rango,
   type ValorDiario,
   type ValorEnDia,
 } from '../lib/series';
-import type { DatosComparativa, Lanzamiento } from '../lib/tipos';
+import type { DatosComparativa, Lanzamiento, SerieVentas } from '../lib/tipos';
 import { PALETA, ejeX, ejeY, estiloTooltip, pintar, type OpcionesMarcas } from './graficas';
 
 type Vista = 'acumulado' | 'diario';
@@ -45,8 +60,14 @@ interface Estado {
   dia: number;
   vistaRegistros: Vista;
   vistaInversion: Vista;
+  vistaVentas: Vista;
+  vistaDownsell: Vista;
   vistaTabla: Vista;
 }
+type ClaveVista = 'vistaRegistros' | 'vistaInversion' | 'vistaVentas' | 'vistaDownsell' | 'vistaTabla';
+
+/** Las ventas de Cartera se registran en dólares. */
+const MONEDA_VENTAS = 'USD';
 
 const MESES = [
   'Enero', 'Febrero', 'Marzo', 'Abril', 'Mayo', 'Junio',
@@ -92,6 +113,8 @@ function iniciar(datos: DatosComparativa) {
     dia: 0,
     vistaRegistros: 'acumulado',
     vistaInversion: 'acumulado',
+    vistaVentas: 'acumulado',
+    vistaDownsell: 'acumulado',
     vistaTabla: 'acumulado',
   };
 
@@ -101,22 +124,29 @@ function iniciar(datos: DatosComparativa) {
   /** El más reciente: el que normalmente se está siguiendo. */
   const principal = () => seleccionados().at(-1)!;
 
-  function rangoSeleccion() {
-    const rangos = seleccionados().map((l) => rangoDe(l)!);
+  /** Rango que cubre los de la selección; `null` si ninguno tiene datos de ese tipo. */
+  function rangoSeleccion(de: (l: Lanzamiento) => Rango | null = rangoDe): Rango | null {
+    const rangos = seleccionados()
+      .map(de)
+      .filter((r) => r !== null);
+    if (rangos.length === 0) return null;
     return {
       desde: Math.min(...rangos.map((r) => r.desde)),
       hasta: Math.max(...rangos.map((r) => r.hasta)),
     };
   }
 
-  /** Último día con registros del lanzamiento más reciente: "cómo vamos hoy". */
+  /** Último día con registros o ventas del lanzamiento más reciente: "cómo vamos hoy". */
   function diaPorDefecto() {
     const p = principal();
-    return p.registros.at(-1)?.dia ?? rangoDe(p)!.hasta;
+    const ultimos = [p.registros, p.ventas.puntos, p.downsell.puntos]
+      .map((puntos) => puntos.at(-1)?.dia)
+      .filter((d) => d !== undefined);
+    return ultimos.length ? Math.max(...ultimos) : rangoDe(p)!.hasta;
   }
 
   function ajustarDia(dia: number) {
-    const r = rangoSeleccion();
+    const r = rangoSeleccion()!;
     return Number.isFinite(dia) && dia >= r.desde && dia <= r.hasta ? dia : diaPorDefecto();
   }
 
@@ -172,6 +202,14 @@ function iniciar(datos: DatosComparativa) {
   // Tarjetas de lanzamientos (selección)
   // ------------------------------------------------------------------------
 
+  /** "Ventas: PRODUCTO hasta 12 mar (5 fuera de ventana)". */
+  function productosDe(titulo: string, s: SerieVentas) {
+    if (s.productos.length === 0) return `${titulo}: sin producto asociado`;
+    const cierre = s.cierre ? ` hasta ${fmtFechaCorta(s.cierre)}` : '';
+    const fuera = s.fueraDeVentana ? ` (${fmtReg(s.fueraDeVentana)} fuera de ventana)` : '';
+    return `${titulo}: ${s.productos.map(esc).join(' · ')}${cierre}${fuera}`;
+  }
+
   function renderTarjetas() {
     const lista = seleccionados();
     const ref = referencia();
@@ -201,6 +239,7 @@ function iniciar(datos: DatosComparativa) {
             </span>
             <span class="text-xs text-tinta-2">Clase 1: <strong>${fmtFechaLarga(l.fecha)}</strong> · ${textoEstado(l)}</span>
             <span class="text-xs text-tenue">Datos desde ${fmtDia(r.desde)} (${fmtFechaCorta(fechaDe(l, r.desde))}) hasta ${fmtDia(r.hasta)} (${fmtFechaCorta(fechaDe(l, r.hasta))})</span>
+            <span class="text-xs text-tenue">${productosDe('Ventas', l.ventas)}<br />${productosDe('Downsell', l.downsell)}</span>
           </button>`;
       })
       .join('');
@@ -211,7 +250,7 @@ function iniciar(datos: DatosComparativa) {
   // ------------------------------------------------------------------------
 
   function renderDia() {
-    const r = rangoSeleccion();
+    const r = rangoSeleccion()!;
     const input = $<HTMLInputElement>('#dia');
     input.min = String(r.desde);
     input.max = String(r.hasta);
@@ -239,6 +278,52 @@ function iniciar(datos: DatosComparativa) {
     const d = estado.dia;
     const reg = registrosEn(p, d);
     const inv = inversionEn(p, d);
+    const ven = ventasEn(p, d);
+
+    const bloque = (numero: string, unidad: string, frase: string) => `
+      <div class="flex flex-col gap-4 md:flex-row md:items-center md:gap-8">
+        <div class="shrink-0">
+          <p class="flex items-center gap-2 text-xs font-bold uppercase tracking-wide text-tenue">${punto(p)}${esc(corto(p))} · ${fmtDia(d)}</p>
+          <p class="mt-1 text-5xl font-bold leading-none text-morado">${numero}</p>
+          <p class="mt-1 text-sm text-tinta-2">${unidad} al ${fmtFechaLarga(fechaDe(p, d))}</p>
+        </div>
+        <p class="text-sm leading-relaxed text-tinta-2 md:border-l md:border-linea md:pl-8">${frase}</p>
+      </div>`;
+
+    // Desde la primera venta, el resumen sigue las ventas.
+    if (ven && ven.valor > 0) {
+      const cob = cobradoEn(p, d);
+      const conv = conversionEn(p, d);
+      let frase = `<strong>${esc(corto(p))}</strong> lleva ${fmtReg(ven.valor)} ventas ${diaEnFrase(d)}${
+        cob ? ` y ${fmtMoneda(cob.valor, MONEDA_VENTAS)} cobrados` : ''
+      }${conv && reg ? `: el ${fmtTasa(conv.valor)} de sus ${fmtReg(reg.valor)} registros` : ''}.`;
+      const down = downsellEn(p, d);
+      if (down && down.valor > 0) {
+        const cobDown = cobradoDownsellEn(p, d);
+        frase += ` Aparte, el downsell lleva ${fmtReg(down.valor)}${
+          cobDown ? ` (${fmtMoneda(cobDown.valor, MONEDA_VENTAS)})` : ''
+        }.`;
+      }
+
+      if (lista.length > 1 && ref !== p) {
+        const venRef = ventasEn(ref, d);
+        const cobRef = cobradoEn(ref, d);
+        if (venRef) {
+          const dif = ven.valor - venRef.valor;
+          frase += ` En el mismo punto, <strong>${esc(corto(ref))}</strong> llevaba ${fmtReg(venRef.valor)}: son
+            <strong>${fmtReg(Math.abs(dif))} ventas ${dif >= 0 ? 'más' : 'menos'}</strong> ${variacion(ven.valor, venRef.valor, 'sube')}.`;
+        } else {
+          frase += ` ${esc(corto(ref))} no tiene ventas en ese día.`;
+        }
+        if (cob && cobRef && cobRef.valor > 0) {
+          frase += ` Lo cobrado va en ${fmtMoneda(cob.valor, MONEDA_VENTAS)} frente a ${fmtMoneda(cobRef.valor, MONEDA_VENTAS)}
+            ${variacion(cob.valor, cobRef.valor, 'sube')}.`;
+        }
+      }
+
+      $('#resumen').innerHTML = bloque(fmtReg(ven.valor), 'ventas', frase);
+      return;
+    }
 
     if (!reg) {
       const ultimo = p.registros.at(-1);
@@ -268,15 +353,7 @@ function iniciar(datos: DatosComparativa) {
       }
     }
 
-    $('#resumen').innerHTML = `
-      <div class="flex flex-col gap-4 md:flex-row md:items-center md:gap-8">
-        <div class="shrink-0">
-          <p class="flex items-center gap-2 text-xs font-bold uppercase tracking-wide text-tenue">${punto(p)}${esc(corto(p))} · ${fmtDia(d)}</p>
-          <p class="mt-1 text-5xl font-bold leading-none text-morado">${aprox(reg)}${fmtReg(reg.valor)}</p>
-          <p class="mt-1 text-sm text-tinta-2">registros al ${fmtFechaLarga(fechaDe(p, d))}</p>
-        </div>
-        <p class="text-sm leading-relaxed text-tinta-2 md:border-l md:border-linea md:pl-8">${frase}</p>
-      </div>`;
+    $('#resumen').innerHTML = bloque(`${aprox(reg)}${fmtReg(reg.valor)}`, 'registros', frase);
   }
 
   interface Metrica {
@@ -285,6 +362,8 @@ function iniciar(datos: DatosComparativa) {
     formato: (v: number, l: Lanzamiento) => string;
     mejor: Mejor;
     detalle?: (l: Lanzamiento, dia: number) => string;
+    /** Se muestra solo si algún lanzamiento seleccionado tiene ventas de ese tipo. */
+    grupo?: 'ventas' | 'downsell';
   }
 
   const METRICAS: Metrica[] = [
@@ -312,19 +391,83 @@ function iniciar(datos: DatosComparativa) {
         return org && tot && tot.valor > 0 ? `${fmtPorcentaje(org.valor / tot.valor)} del total` : '';
       },
     },
+    { titulo: 'Ventas del lanzamiento', valor: ventasEn, formato: fmtReg, mejor: 'sube', grupo: 'ventas' },
+    {
+      titulo: 'Cobrado del lanzamiento',
+      valor: cobradoEn,
+      formato: (v) => fmtMoneda(v, MONEDA_VENTAS),
+      mejor: 'sube',
+      grupo: 'ventas',
+      detalle: (l, dia) => {
+        const r = retornoEn(l, dia);
+        return r ? `${fmtVeces(r.valor)} la inversión` : '';
+      },
+    },
+    { titulo: 'Conversión registro → venta', valor: conversionEn, formato: fmtTasa, mejor: 'sube', grupo: 'ventas' },
+    {
+      titulo: 'Costo por venta',
+      valor: costoPorVentaEn,
+      formato: (v, l) => fmtMoneda(v, l.moneda),
+      mejor: 'baja',
+      grupo: 'ventas',
+    },
+    {
+      titulo: 'Ventas de downsell',
+      valor: downsellEn,
+      formato: fmtReg,
+      mejor: 'sube',
+      grupo: 'downsell',
+      detalle: (l, dia) => {
+        const c = conversionEn(l, dia, downsellEn);
+        return c ? `${fmtTasa(c.valor)} de los registros` : '';
+      },
+    },
+    {
+      titulo: 'Cobrado del downsell',
+      valor: cobradoDownsellEn,
+      formato: (v) => fmtMoneda(v, MONEDA_VENTAS),
+      mejor: 'sube',
+      grupo: 'downsell',
+    },
+    {
+      titulo: 'Ventas totales (con downsell)',
+      valor: ventasTotalesEn,
+      formato: fmtReg,
+      mejor: 'sube',
+      grupo: 'downsell',
+    },
+    {
+      titulo: 'Cobrado total (con downsell)',
+      valor: cobradoTotalEn,
+      formato: (v) => fmtMoneda(v, MONEDA_VENTAS),
+      mejor: 'sube',
+      grupo: 'downsell',
+      detalle: (l, dia) => {
+        const r = retornoEn(l, dia, cobradoTotalEn);
+        return r ? `${fmtVeces(r.valor)} la inversión` : '';
+      },
+    },
   ];
 
   function renderKpis() {
     const lista = seleccionados();
     const ref = referencia();
     const d = estado.dia;
-    $('#kpis').innerHTML = METRICAS.map((m) => {
+    const grupos = {
+      ventas: lista.some((l) => l.ventas.puntos.length > 0),
+      downsell: lista.some((l) => l.downsell.puntos.length > 0),
+    };
+    $('#kpis').innerHTML = METRICAS.filter((m) => !m.grupo || grupos[m.grupo]).map((m) => {
       const base = m.valor(ref, d);
       const filas = lista
         .map((l) => {
           const v = m.valor(l, d);
           const comparar = l !== ref && v && base && base.valor > 0;
-          const detalle = v && m.detalle ? m.detalle(l, d) : '';
+          // Pasada la Clase 1, registros e inversión son los del cierre de la captación;
+          // pasada su ventana, las ventas son las del cierre.
+          const detalle = [v && m.detalle ? m.detalle(l, d) : '', v?.tipo === 'cierre' ? 'al cierre' : '']
+            .filter(Boolean)
+            .join(' · ');
           return `
             <li class="grid grid-cols-[auto_1fr_auto] items-baseline gap-x-2">
               ${punto(l)}
@@ -364,6 +507,8 @@ function iniciar(datos: DatosComparativa) {
     const regFinal = registrosEn(ref, cierre)!.valor;
     const invPuntos = ref.inversion.puntos.filter((p) => p.dia <= 0);
     const invFinal = (invPuntos.at(-1) ?? ref.inversion.puntos.at(-1))?.acumulado ?? 0;
+    const venFinal = ref.ventas.puntos.at(-1)?.ventas ?? 0;
+    const downFinal = ref.downsell.puntos.at(-1)?.ventas ?? 0;
 
     const medidor = (etiqueta: string, actual: number, total: number, texto: (v: number) => string, l: Lanzamiento) => {
       const pct = total > 0 ? actual / total : 0;
@@ -388,11 +533,15 @@ function iniciar(datos: DatosComparativa) {
       .map((l) => {
         const reg = registrosEn(l, d);
         const inv = inversionEn(l, d);
+        const ven = ventasEn(l, d);
+        const down = downsellEn(l, d);
         return `
           <div class="space-y-3">
             <p class="flex items-center gap-2 text-sm font-bold">${punto(l)}${esc(corto(l))} <span class="font-medium text-tenue">en ${fmtDia(d)}</span></p>
             ${reg ? medidor('Registros', reg.valor, regFinal, fmtReg, l) : '<p class="text-xs text-tenue">Sin registros en ese día.</p>'}
             ${inv && invFinal > 0 ? medidor('Inversión', inv.valor, invFinal, (v) => fmtMoneda(v, ref.moneda, 0), l) : ''}
+            ${ven && ven.valor > 0 && venFinal > 0 ? medidor('Ventas del lanzamiento', ven.valor, venFinal, fmtReg, l) : ''}
+            ${down && down.valor > 0 && downFinal > 0 ? medidor('Downsell', down.valor, downFinal, fmtReg, l) : ''}
           </div>`;
       })
       .join('');
@@ -401,7 +550,9 @@ function iniciar(datos: DatosComparativa) {
       <div class="panel">
         <h2 class="text-sm font-bold">Frente al cierre de ${esc(corto(ref))}</h2>
         <p class="text-xs text-tenue">Cierre de captación: ${fmtDia(cierre)} (${fmtFechaLarga(fechaDe(ref, cierre))}),
-          ${fmtReg(regFinal)} registros y ${fmtMoneda(invFinal, ref.moneda)} de inversión.</p>
+          ${fmtReg(regFinal)} registros y ${fmtMoneda(invFinal, ref.moneda)} de inversión.${
+            venFinal > 0 ? ` Ventas del lanzamiento: ${fmtReg(venFinal)}.` : ''
+          }${downFinal > 0 ? ` Downsell: ${fmtReg(downFinal)}.` : ''}</p>
         <div class="mt-4 grid grid-cols-1 gap-6 md:grid-cols-2">${bloques}</div>
       </div>`;
   }
@@ -420,20 +571,24 @@ function iniciar(datos: DatosComparativa) {
     document.querySelectorAll('[data-leyenda]').forEach((n) => (n.innerHTML = html));
   }
 
-  /** Eje de días común a las gráficas temporales: siempre llega hasta la Clase 1. */
-  function ejeDias() {
-    const r = rangoSeleccion();
+  /** Días de captación de la selección: el eje de registros, inversión y costo. */
+  const rangoCaptacion = () => rangoSeleccion(rangoCaptacionDe) ?? rangoSeleccion()!;
+
+  /** Eje de días de una gráfica temporal: siempre incluye la Clase 1. */
+  function ejeDias(r: Rango) {
+    const desde = Math.min(r.desde, 0);
     const hasta = Math.max(r.hasta, 0);
     const dias: number[] = [];
-    for (let d = r.desde; d <= hasta; d++) dias.push(d);
-    const indice = (d: number) => d - r.desde;
+    for (let d = desde; d <= hasta; d++) dias.push(d);
+    const indice = (d: number) => d - desde;
     const enCurso = seleccionados().filter(
-      (l) => (l.estado === 'captacion' || l.estado === 'clases') && l.diaHoy >= r.desde && l.diaHoy <= hasta,
+      (l) => (l.estado === 'captacion' || l.estado === 'clases') && l.diaHoy >= desde && l.diaHoy <= hasta,
     );
     const hoyes = [...new Set(enCurso.map((l) => l.diaHoy))];
     const marcas: OpcionesMarcas = {
       clase1: indice(0),
-      comparado: indice(estado.dia),
+      // El día comparado puede quedar fuera (p. ej. un día de ventas en el eje de captación).
+      comparado: estado.dia >= desde && estado.dia <= hasta ? indice(estado.dia) : undefined,
       hoy: hoyes.map((d) => ({ indice: indice(d), texto: 'Hoy' })),
     };
     return { dias, marcas };
@@ -486,13 +641,14 @@ function iniciar(datos: DatosComparativa) {
    */
   function configTemporal<P extends { dia: number }>(opciones: {
     vista: Vista;
+    rango: Rango;
     puntos: (l: Lanzamiento) => P[];
     valor: (p: P) => number;
     formato: (v: number, l: Lanzamiento) => string;
     formatoEje: (v: number) => string;
   }): ChartConfiguration {
     const lista = seleccionados();
-    const { dias, marcas } = ejeDias();
+    const { dias, marcas } = ejeDias(opciones.rango);
     const labels = dias.map(fmtDia);
     const diarios = lista.map((l) => diarioRepartido(opciones.puntos(l), opciones.valor));
 
@@ -563,6 +719,7 @@ function iniciar(datos: DatosComparativa) {
     const p = principal();
     const moneda = p.moneda;
     const monedas = new Set(lista.filter((l) => l.inversion.origen).map((l) => l.moneda));
+    const captacion = rangoCaptacion();
 
     // Registros
     $('[data-sub="registros"]').textContent =
@@ -573,6 +730,7 @@ function iniciar(datos: DatosComparativa) {
       $<HTMLCanvasElement>('#g-registros'),
       configTemporal({
         vista: estado.vistaRegistros,
+        rango: captacion,
         puntos: (l) => l.registros,
         valor: (pt) => pt.total,
         formato: (v) => fmtReg(v),
@@ -589,6 +747,7 @@ function iniciar(datos: DatosComparativa) {
       $<HTMLCanvasElement>('#g-inversion'),
       configTemporal({
         vista: estado.vistaInversion,
+        rango: captacion,
         puntos: (l) => l.inversion.puntos,
         valor: (pt) => pt.acumulado,
         formato: (v, l) => fmtMoneda(v, l.moneda),
@@ -599,7 +758,7 @@ function iniciar(datos: DatosComparativa) {
 
     // Costo por registro de pauta (en los días con registro).
     {
-      const { dias, marcas } = ejeDias();
+      const { dias, marcas } = ejeDias(captacion);
       pintar(
         $<HTMLCanvasElement>('#g-costo'),
         {
@@ -701,6 +860,41 @@ function iniciar(datos: DatosComparativa) {
         animar,
       );
     }
+
+    // Ventas del lanzamiento y del downsell: cada una con su eje, desde la
+    // Clase 1 hasta su última venta. Si solo hay una, ocupa todo el ancho.
+    const rangoVentas = rangoSeleccion(rangoVentasDe);
+    const rangoDownsell = rangoSeleccion(rangoDownsellDe);
+    const graficaVentas = (
+      tipo: 'ventas' | 'downsell',
+      rango: Rango | null,
+      vista: Vista,
+      serie: (l: Lanzamiento) => SerieVentas,
+      otraVisible: boolean,
+    ) => {
+      const panel = $(`#panel-${tipo}`);
+      panel.hidden = !rango;
+      panel.classList.toggle('lg:col-span-2', !otraVisible);
+      if (!rango) return;
+      $(`[data-sub="${tipo}"]`).textContent =
+        vista === 'acumulado'
+          ? 'Ventas acumuladas, contadas el día del primer pago.'
+          : 'Ventas nuevas de cada día (día del primer pago).';
+      pintar(
+        $<HTMLCanvasElement>(`#g-${tipo}`),
+        configTemporal({
+          vista,
+          rango,
+          puntos: (l) => serie(l).puntos,
+          valor: (pt) => pt.ventas,
+          formato: (v) => fmtReg(v),
+          formatoEje: fmtCompacto,
+        }),
+        animar,
+      );
+    };
+    graficaVentas('ventas', rangoVentas, estado.vistaVentas, (l) => l.ventas, !!rangoDownsell);
+    graficaVentas('downsell', rangoDownsell, estado.vistaDownsell, (l) => l.downsell, !!rangoVentas);
   }
 
   // ------------------------------------------------------------------------
@@ -718,9 +912,11 @@ function iniciar(datos: DatosComparativa) {
     const vista = estado.vistaTabla;
     const diaSel = estado.dia;
 
-    const dias = [
-      ...new Set(lista.flatMap((l) => [...l.registros.map((p) => p.dia), ...l.inversion.puntos.map((p) => p.dia)])),
-    ].sort((a, b) => a - b);
+    const datosVentas = (s: SerieVentas) => ({
+      puntos: new Map(s.puntos.map((p) => [p.dia, p])),
+      ventasInc: incrementos(s.puntos, (p) => p.ventas),
+      cobradoInc: incrementos(s.puntos, (p) => p.cobrado),
+    });
 
     const info = new Map(
       lista.map((l) => [
@@ -731,9 +927,25 @@ function iniciar(datos: DatosComparativa) {
           regInc: incrementos(l.registros, (p) => p.total),
           pautaInc: incrementos(l.registros, (p) => p.pauta),
           invInc: incrementos(l.inversion.puntos, (p) => p.acumulado),
+          ventas: datosVentas(l.ventas),
+          downsell: datosVentas(l.downsell),
         },
       ]),
     );
+
+    // Las series de ventas son continuas: solo se muestran los días en que se vendió o cobró algo.
+    const dias = [
+      ...new Set(
+        lista.flatMap((l) => {
+          const x = info.get(l.id)!;
+          const conVentas = [x.ventas, x.downsell]
+            .flatMap((s) => [...s.ventasInc.values(), ...s.cobradoInc.values()])
+            .filter((i) => i.valor > 0)
+            .map((i) => i.dia);
+          return [...x.reg.keys(), ...x.inv.keys(), ...conVentas];
+        }),
+      ),
+    ].sort((a, b) => a - b);
 
     const desdeInc = (i: Incremento | undefined): Celda => (i ? { valor: i.valor, cubre: i.cubre } : { valor: null });
 
@@ -777,6 +989,33 @@ function iniciar(datos: DatosComparativa) {
         mejor: 'baja',
       },
     ];
+    const sufijo = vista === 'acumulado' ? 'acumulado' : 'por día';
+    for (const [tipo, ventas, cobrado] of [
+      ['ventas', 'Ventas del lanzamiento', 'Cobrado del lanzamiento'],
+      ['downsell', 'Ventas de downsell', 'Cobrado del downsell'],
+    ] as const) {
+      if (!lista.some((l) => l[tipo].puntos.length > 0)) continue;
+      metricas.push(
+        {
+          titulo: `${ventas} · ${sufijo}`,
+          celda: (l, d) => {
+            const x = info.get(l.id)![tipo];
+            return vista === 'acumulado' ? { valor: x.puntos.get(d)?.ventas ?? null } : desdeInc(x.ventasInc.get(d));
+          },
+          formato: (v) => fmtReg(v),
+          mejor: 'sube',
+        },
+        {
+          titulo: `${cobrado} · ${sufijo}`,
+          celda: (l, d) => {
+            const x = info.get(l.id)![tipo];
+            return vista === 'acumulado' ? { valor: x.puntos.get(d)?.cobrado ?? null } : desdeInc(x.cobradoInc.get(d));
+          },
+          formato: (v) => fmtMoneda(v, MONEDA_VENTAS),
+          mejor: 'sube',
+        },
+      );
+    }
 
     const claseCol = (d: number) => (d === diaSel ? 'bg-morado/[0.06]' : '');
     const th = (contenido: string, clase = '') =>
@@ -795,7 +1034,15 @@ function iniciar(datos: DatosComparativa) {
       const x = info.get(l.id)!;
       filas.push(
         `<tr>${th(`<span class="inline-flex items-center gap-2">${punto(l)}${esc(corto(l))}</span>`, 'bg-white text-tinta')}${dias
-          .map((d) => td(d, fmtFechaCorta(fechaDe(l, d)), x.reg.has(d) || x.inv.has(d) ? 'text-xs text-tinta-2' : 'text-xs text-tenue/60'))
+          .map((d) =>
+            td(
+              d,
+              fmtFechaCorta(fechaDe(l, d)),
+              x.reg.has(d) || x.inv.has(d) || x.ventas.puntos.has(d) || x.downsell.puntos.has(d)
+                ? 'text-xs text-tinta-2'
+                : 'text-xs text-tenue/60',
+            ),
+          )
           .join('')}</tr>`,
       );
     }
@@ -837,7 +1084,7 @@ function iniciar(datos: DatosComparativa) {
 
     $('#tabla-dias').innerHTML = `
       <table class="w-max min-w-full border-separate border-spacing-0 text-sm">
-        <caption class="sr-only">Registros, inversión y costo por registro de cada lanzamiento, por día relativo a la Clase 1</caption>
+        <caption class="sr-only">Registros, inversión, costo por registro, ventas y downsell de cada lanzamiento, por día relativo a la Clase 1</caption>
         <thead>
           <tr>
             <th scope="col" class="sticky left-0 z-20 bg-morado px-3 py-2 text-left text-xs font-bold uppercase text-white">Día</th>
@@ -1006,7 +1253,7 @@ function iniciar(datos: DatosComparativa) {
 
   function renderControles() {
     document.querySelectorAll<HTMLElement>('[data-control]').forEach((grupo) => {
-      const clave = grupo.dataset.control as 'vistaRegistros' | 'vistaInversion' | 'vistaTabla';
+      const clave = grupo.dataset.control as ClaveVista;
       grupo.querySelectorAll<HTMLButtonElement>('button').forEach((b) => {
         b.setAttribute('aria-pressed', String(b.dataset.valor === estado[clave]));
       });
@@ -1076,7 +1323,7 @@ function iniciar(datos: DatosComparativa) {
     grupo.addEventListener('click', (e) => {
       const boton = (e.target as HTMLElement).closest<HTMLButtonElement>('button[data-valor]');
       if (!boton) return;
-      const clave = grupo.dataset.control as 'vistaRegistros' | 'vistaInversion' | 'vistaTabla';
+      const clave = grupo.dataset.control as ClaveVista;
       estado[clave] = boton.dataset.valor as Vista;
       renderTodo();
     });

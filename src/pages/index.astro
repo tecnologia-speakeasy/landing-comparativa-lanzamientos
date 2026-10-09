@@ -17,7 +17,13 @@ try {
 
 // `<` escapado para que ningún nombre pueda cerrar la etiqueta script de datos.
 const json = datos ? JSON.stringify(datos).replace(/</g, '\\u003c') : '';
-const hayDatos = !!datos?.lanzamientos.some((l) => l.registros.length > 0 || l.inversion.puntos.length > 0);
+const hayDatos = !!datos?.lanzamientos.some(
+  (l) =>
+    l.registros.length > 0 ||
+    l.inversion.puntos.length > 0 ||
+    l.ventas.puntos.length > 0 ||
+    l.downsell.puntos.length > 0,
+);
 ---
 
 <Layout titulo="Comparativa de lanzamientos · Speak Easy">
@@ -27,7 +33,7 @@ const hayDatos = !!datos?.lanzamientos.some((l) => l.registros.length > 0 || l.i
       <div class="min-w-0 flex-1">
         <h1 class="text-xl font-bold sm:text-2xl">Comparativa de lanzamientos</h1>
         <p class="text-sm text-white/80">
-          Registros e inversión día a día, alineados a la Clase 1 de cada lanzamiento.
+          Registros, inversión y ventas día a día, alineados a la Clase 1 de cada lanzamiento.
         </p>
       </div>
       {
@@ -153,6 +159,40 @@ const hayDatos = !!datos?.lanzamientos.some((l) => l.registros.length > 0 || l.i
                 <canvas id="g-fuentes" role="img" aria-label="Registros acumulados por fuente en el día comparado" />
               </div>
             </article>
+
+            <article id="panel-ventas" class="panel min-w-0" aria-labelledby="t-g-ventas">
+              <header class="flex flex-wrap items-start justify-between gap-2">
+                <div>
+                  <h2 id="t-g-ventas" class="text-sm font-bold">Ventas del lanzamiento</h2>
+                  <p class="text-xs text-tenue" data-sub="ventas" />
+                </div>
+                <div class="segmento" role="group" aria-label="Vista de ventas del lanzamiento" data-control="vistaVentas">
+                  <button type="button" data-valor="acumulado">Acumuladas</button>
+                  <button type="button" data-valor="diario">Por día</button>
+                </div>
+              </header>
+              <div class="mt-3 flex flex-wrap gap-x-4 gap-y-1" data-leyenda />
+              <div class="relative mt-2 h-72">
+                <canvas id="g-ventas" role="img" aria-label="Ventas del lanzamiento por día alineadas a la Clase 1" />
+              </div>
+            </article>
+
+            <article id="panel-downsell" class="panel min-w-0" aria-labelledby="t-g-downsell">
+              <header class="flex flex-wrap items-start justify-between gap-2">
+                <div>
+                  <h2 id="t-g-downsell" class="text-sm font-bold">Downsell</h2>
+                  <p class="text-xs text-tenue" data-sub="downsell" />
+                </div>
+                <div class="segmento" role="group" aria-label="Vista de downsell" data-control="vistaDownsell">
+                  <button type="button" data-valor="acumulado">Acumuladas</button>
+                  <button type="button" data-valor="diario">Por día</button>
+                </div>
+              </header>
+              <div class="mt-3 flex flex-wrap gap-x-4 gap-y-1" data-leyenda />
+              <div class="relative mt-2 h-72">
+                <canvas id="g-downsell" role="img" aria-label="Ventas de downsell por día alineadas a la Clase 1" />
+              </div>
+            </article>
           </section>
 
           {/* Tabla día a día */}
@@ -190,7 +230,7 @@ const hayDatos = !!datos?.lanzamientos.some((l) => l.registros.length > 0 || l.i
           <footer class="space-y-1 pb-4 text-xs text-tenue">
             <p>
               <strong class="text-tinta-2">Fuente:</strong> módulo Lanzamientos de inventario (tablas de Métricas y
-              Captación paga). Esta página solo lee la base de datos.
+              Captación paga) y módulo Cartera (ventas). Esta página solo lee la base de datos.
             </p>
             <p>
               <strong class="text-tinta-2">Registros:</strong> total acumulado de todas las fuentes. "Pauta" agrupa las
@@ -198,7 +238,15 @@ const hayDatos = !!datos?.lanzamientos.some((l) => l.registros.length > 0 || l.i
             </p>
             <p>
               <strong class="text-tinta-2">Inversión:</strong> si el lanzamiento tiene la tabla de Captación paga, se
-              suma por plataforma; si no, se usa la inversión acumulada registrada.
+              suma por plataforma; si no, se usa la inversión acumulada registrada. Pasada la Clase 1, registros e
+              inversión son los del cierre de la captación.
+            </p>
+            <p>
+              <strong class="text-tinta-2">Ventas:</strong> compras de los productos de Cartera asociados a cada
+              lanzamiento; las del lanzamiento y las del downsell se cuentan por separado. Cada una cuenta el día de su
+              primer pago, aunque después se haya cancelado, y solo dentro de su ventana (carrito más rezagadas); las
+              posteriores se indican como "fuera de ventana". "Cobrado" suma lo ingresado en dólares hasta ese día,
+              cuotas incluidas.
             </p>
             <p>
               <strong class="text-tinta-2">Días sin registro:</strong> "≈" indica un valor estimado entre los días
