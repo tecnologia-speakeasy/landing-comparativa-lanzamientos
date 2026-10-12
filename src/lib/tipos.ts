@@ -58,6 +58,13 @@ export interface PuntoVentas {
   cobrado: number;
 }
 
+/** Una venta dentro de la ventana: el día y la hora de su primer pago. */
+export interface Compra {
+  dia: number;
+  /** 'HH:MM' en hora de Colombia; `null` si el pago no tiene hora registrada. */
+  hora: string | null;
+}
+
 /**
  * Ventas de un tipo (las del lanzamiento o las del downsell), de los
  * productos de Cartera asociados en productos-lanzamiento.ts.
@@ -71,6 +78,8 @@ export interface SerieVentas {
   cerrada: boolean;
   /** Continua desde la primera venta: un día sin ventas repite el acumulado. */
   puntos: PuntoVentas[];
+  /** Cada venta de `puntos`, para filtrar por día y hora. */
+  compras: Compra[];
   /** Compras con primer pago después del cierre: no entran en `puntos`. */
   fueraDeVentana: number;
 }
@@ -82,7 +91,31 @@ export interface SerieVentas {
  */
 export type OrigenInversion = 'plataformas' | 'acumulada' | null;
 
-export type EstadoLanzamiento = 'proximo' | 'captacion' | 'clases' | 'finalizado';
+/** Lectura de asistencia en vivo durante una clase. */
+export interface MuestraAsistencia {
+  /** 'HH:MM', hora de Colombia. */
+  hora: string;
+  youtube: number | null;
+  zoom: number | null;
+}
+
+/** Copy de la parrilla enviado el día de una clase (solo el inicio del texto). */
+export interface MensajeClase {
+  /** 'HH:MM'; `null` si no tiene hora. */
+  hora: string | null;
+  inicio: string;
+  enviado: boolean;
+}
+
+export interface ClaseLanzamiento {
+  numero: number;
+  /** 'YYYY-MM-DD'; `null` si la clase no está en clases_lanzamiento. */
+  fecha: string | null;
+  muestras: MuestraAsistencia[];
+  mensajes: MensajeClase[];
+}
+
+export type EstadoLanzamiento ='proximo' | 'captacion' | 'clases' | 'finalizado';
 
 export interface Lanzamiento {
   id: string;
@@ -101,6 +134,8 @@ export interface Lanzamiento {
   plataformas: Plataforma[];
   ventas: SerieVentas;
   downsell: SerieVentas;
+  /** Asistencia y mensajería de cada clase, por número de clase. */
+  clases: ClaseLanzamiento[];
 }
 
 export interface DatosComparativa {

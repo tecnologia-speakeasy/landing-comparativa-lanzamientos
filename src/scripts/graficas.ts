@@ -36,6 +36,9 @@ export const TINTA = {
  */
 export const PALETA = ['#6b46c1', '#ff327d', '#2a78d6', '#eda100', '#1baf7a'];
 
+/** Comparativa simple: el lanzamiento actual en fucsia y el pasado en morado de marca. */
+export const COLORES = { actual: '#ff327d', pasado: '#41276b' };
+
 const FUENTE = "'Montserrat Variable', Montserrat, Arial, sans-serif";
 Chart.defaults.font.family = FUENTE;
 Chart.defaults.font.size = 12;
@@ -61,7 +64,16 @@ declare module 'chart.js' {
     marcas?: OpcionesMarcas;
     etiquetasFinales?: { formato: (v: number) => string } | false;
     etiquetasBarras?: { formato: (v: number) => string } | false;
+    mensajes?: { marcas: MarcaMensaje[] };
+    valoresLinea?: { indices: number[]; formato: (v: number) => string } | false;
   }
+}
+
+/** Un copy enviado: línea vertical punteada en su hora, del color de su lanzamiento. */
+export interface MarcaMensaje {
+  /** Posición en el eje de categorías; con decimales si cae entre dos lecturas. */
+  posicion: number;
+  color: string;
 }
 
 function anchoCategoria(chart: Chart): number {
@@ -178,31 +190,111 @@ const etiquetasFinales: Plugin = {
   },
 };
 
-/** Valor en la punta de cada barra horizontal. */
+/** Valor en la punta de cada barra: a la derecha si es horizontal, encima si es vertical. */
 const etiquetasBarras: Plugin = {
   id: 'etiquetasBarras',
   afterDatasetsDraw(chart, _args, opciones) {
     if (!opciones || !('formato' in opciones)) return;
     const { ctx } = chart;
+    const horizontal = chart.options.indexAxis === 'y';
     ctx.save();
     ctx.font = `600 11px ${FUENTE}`;
     ctx.fillStyle = TINTA.secundaria;
-    ctx.textBaseline = 'middle';
-    ctx.textAlign = 'left';
+    ctx.textBaseline = horizontal ? 'middle' : 'bottom';
+    ctx.textAlign = horizontal ? 'left' : 'center';
     chart.data.datasets.forEach((ds, i) => {
       const meta = chart.getDatasetMeta(i);
       if (meta.hidden) return;
       (ds.data as (number | null)[]).forEach((v, k) => {
         if (v == null) return;
         const barra = meta.data[k] as unknown as { x: number; y: number };
-        ctx.fillText(opciones.formato(v), barra.x + 6, barra.y);
+        if (horizontal) ctx.fillText(opciones.formato(v), barra.x + 6, barra.y);
+        else ctx.fillText(opciones.formato(v), barra.x, barra.y - 4);
       });
     });
     ctx.restore();
   },
 };
 
-Chart.register(marcas, guia, etiquetasFinales, etiquetasBarras);
+const mensajes: Plugin = {
+  id: 'mensajes',
+  beforeDatasetsDraw(chart, _args, opciones: { marcas?: MarcaMensaje[] }) {
+    const lista = opciones?.marcas;
+    if (!lista || lista.length === 0) return;
+    const { ctx, chartArea } = chart;
+    const x = chart.scales.x;
+    const n = chart.data.labels?.length ?? 0;
+    // Entre dos categorías se interpola: un copy de las 19:47 cae entre 19:45 y 19:50.
+    const pixel = (p: number) => {
+      const i = Math.max(0, Math.min(n - 1, Math.floor(p)));
+      const siguiente = Math.min(n - 1, i + 1);
+      const a = x.getPixelForValue(i);
+      return a + (x.getPixelForValue(siguiente) - a) * (p - i);
+    };
+    ctx.save();
+    ctx.lineWidth = 1.5;
+    ctx.setLineDash([4, 3]);
+    for (const m of lista) {
+      const px = Math.round(pixel(m.posicion)) + 0.5;
+      ctx.strokeStyle = m.color;
+      ctx.globalAlpha = 0.55;
+      ctx.beginPath();
+      ctx.moveTo(px, chartArea.top + 6);
+      ctx.lineTo(px, chartArea.bottom);
+      ctx.stroke();
+      ctx.globalAlpha = 1;
+      ctx.fillStyle = m.color;
+      ctx.beginPath();
+      ctx.arc(px, chartArea.top + 3, 3, 0, Math.PI * 2);
+      ctx.fill();
+    }
+    ctx.restore();
+  },
+};
+
+/**
+ * Valor sobre cada línea en las categorías pedidas (p. ej. cada 10 minutos).
+ * Si dos líneas pasan cerca, la de abajo lleva su número debajo para que no
+ * se pisen. Texto oscuro con halo blanco: legible sobre la grilla y las líneas.
+ */
+const valoresLinea: Plugin = {
+  id: 'valoresLinea',
+  afterDatasetsDraw(chart, _args, opciones) {
+    if (!opciones || !('indices' in opciones)) return;
+    const { ctx, chartArea } = chart;
+    ctx.save();
+    ctx.font = `600 10px ${FUENTE}`;
+    ctx.textAlign = 'center';
+    ctx.lineJoin = 'round';
+    ctx.lineWidth = 3;
+    ctx.strokeStyle = TINTA.superficie;
+    ctx.fillStyle = TINTA.primaria;
+    for (const indice of opciones.indices) {
+      const puntos = chart.data.datasets
+        .map((ds, i) => {
+          const meta = chart.getDatasetMeta(i);
+          const v = (ds.data as (number | null)[])[indice];
+          if (meta.hidden || v == null) return null;
+          const p = meta.data[indice] as unknown as { x: number; y: number };
+          return { x: p.x, y: p.y, v };
+        })
+        .filter((p) => p !== null)
+        .sort((a, b) => a.y - b.y);
+      puntos.forEach((p, k) => {
+        const cerca = k > 0 && p.y - puntos[k - 1].y < 18;
+        const abajo = cerca || p.y - 14 < chartArea.top;
+        ctx.textBaseline = abajo ? 'top' : 'bottom';
+        const y = abajo ? p.y + 6 : p.y - 6;
+        const texto = opciones.formato(p.v);
+        ctx.strokeText(texto, p.x, y);
+        ctx.fillText(texto, p.x, y);
+      });
+    }
+    ctx.restore();
+  },
+};
+
+Chart.register(marcas, guia, etiquetasFinales, etiquetasBarras, mensajes, valoresLinea);
 
 // ---------------------------------------------------------------------------
 // Opciones compartidas
@@ -224,7 +316,8 @@ export const estiloTooltip = {
 };
 
 export const ejeX = {
-  grid: { display: false },
+  // Una línea vertical por día para ubicar cada fecha.
+  grid: { color: TINTA.grilla },
   border: { color: TINTA.eje },
   ticks: { color: TINTA.tenue, maxRotation: 0, autoSkipPadding: 12 },
 };

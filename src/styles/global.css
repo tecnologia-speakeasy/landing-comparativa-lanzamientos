@@ -74,6 +74,14 @@ button:not(:disabled) {
   border-radius: 999px;
 }
 
+/* Selectores del filtro de ventas. */
+.filtro {
+  @apply rounded-lg border border-lila-borde bg-white px-2 py-1.5 text-xs font-semibold text-tinta;
+}
+.filtro:focus-visible {
+  @apply outline-2 outline-offset-2 outline-rosa;
+}
+
 /* Deslizador del día de comparación. */
 input[type='range'].deslizador {
   accent-color: var(--color-morado);

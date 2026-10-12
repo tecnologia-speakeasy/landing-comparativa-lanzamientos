@@ -2,6 +2,7 @@ import { consultar } from './db';
 import { diasEntre, hoyColombia, sumarDias } from './fechas';
 import { VENTAS_POR_LANZAMIENTO, type TipoVenta } from './productos-lanzamiento';
 import type {
+  ClaseLanzamiento,
   DatosComparativa,
   EstadoLanzamiento,
   FuenteCanonica,
@@ -23,6 +24,9 @@ import type {
  *   fuentes_metrica2     ─┐ registros e inversión DIARIOS por plataforma paga
  *   registros_metrica2   ─┘ (la tabla "Captación paga")
  *   registros_inversion     gasto ACUMULADO por día (tabla anterior a "Captación paga")
+ *   muestras_asistencia     asistencia en YouTube y Zoom cada pocos minutos de cada clase
+ *   dias_parrilla         ─┐ copys de la comunidad por día y hora (la "Parrilla");
+ *   mensajes_parrilla     ─┘ los del día de cada clase se cruzan con su asistencia
  *
  * Y del módulo Cartera, para las ventas:
  *
@@ -94,10 +98,31 @@ interface FilaProducto {
   id: string;
   nombre: string;
 }
-interface FilaVentas {
+interface FilaCompra {
   producto_id: string;
+  /** Día del primer pago. */
   fecha: string;
-  ventas: number;
+  /** Hora del primer pago ('HH:MM', Colombia), si se registró. */
+  hora: string | null;
+}
+interface FilaClase {
+  lanzamiento_id: string;
+  numero: number;
+  fecha: string;
+}
+interface FilaMuestra {
+  lanzamiento_id: string;
+  clase_numero: number;
+  hora: string;
+  youtube: number | null;
+  zoom: number | null;
+}
+interface FilaMensaje {
+  lanzamiento_id: string;
+  fecha: string;
+  hora: string | null;
+  copy: string | null;
+  enviado: boolean;
 }
 interface FilaCobro {
   producto_id: string;
@@ -112,19 +137,15 @@ function consultarCartera() {
   ];
   return Promise.all([
     consultar<FilaProducto>(`select id, nombre from cartera_productos where id = any($1::uuid[])`, [ids]),
-    // La venta cuenta el día de su primer pago: `created_at` no sirve porque las
-    // compras de marzo se cargaron todas juntas en junio, al crear Cartera.
-    consultar<FilaVentas>(
+    // La venta cuenta el día y la hora de su primer pago: `created_at` no sirve
+    // porque las compras de marzo se cargaron todas juntas en junio, al crear Cartera.
+    consultar<FilaCompra>(
       `
-      select producto_id, fecha::text as fecha, count(*)::int as ventas
-        from (select c.producto_id, min(p.fecha_pago) as fecha
-                from cartera_compras c
-                join cartera_compras_pagos p on p.compra_id = c.id
-               where c.producto_id = any($1::uuid[])
-               group by c.id, c.producto_id) primeras
-       where fecha is not null
-       group by producto_id, fecha
-       order by fecha`,
+      select distinct on (c.id) c.producto_id, p.fecha_pago::text as fecha, nullif(trim(p.hora_pago), '') as hora
+        from cartera_compras c
+        join cartera_compras_pagos p on p.compra_id = c.id
+       where c.producto_id = any($1::uuid[]) and p.fecha_pago is not null
+       order by c.id, p.fecha_pago, p.hora_pago nulls last, p.created_at`,
       [ids],
     ),
     consultar<FilaCobro>(
@@ -143,7 +164,7 @@ function consultarCartera() {
 export async function cargarComparativa(): Promise<DatosComparativa> {
   // Las fechas salen como texto: el tipo DATE de pg se convierte a Date en la
   // zona del servidor y puede correrse un día.
-  const [lanzamientos, fuentes, registros, inversiones, plataformas, registros2, cartera] = await Promise.all([
+  const [lanzamientos, fuentes, registros, inversiones, plataformas, registros2, cartera, clasesYParrilla] = await Promise.all([
     consultar<FilaLanzamiento>(`
       select l.id, l.nombre, l.fecha::text as fecha, l.moneda_inversion as moneda,
              (select max(c.fecha)::text from clases_lanzamiento c where c.lanzamiento_id = l.id) as ultima_clase
@@ -160,8 +181,22 @@ export async function cargarComparativa(): Promise<DatosComparativa> {
     consultar<FilaRegistro2>(`
       select fuente_id, fecha::text as fecha, valor, inversion from registros_metrica2 order by fecha`),
     consultarCartera(),
+    Promise.all([
+      consultar<FilaClase>(`
+        select lanzamiento_id, numero, fecha::text as fecha from clases_lanzamiento order by numero`),
+      consultar<FilaMuestra>(`
+        select lanzamiento_id, clase_numero, trim(hora) as hora, youtube, zoom
+          from muestras_asistencia where hora ~ '^\\s*\\d{1,2}:\\d{2}' order by clase_numero, hora`),
+      // Solo el inicio del copy: la página muestra la primera frase, no el texto completo.
+      consultar<FilaMensaje>(`
+        select m.lanzamiento_id, d.fecha::text as fecha, nullif(trim(m.hora), '') as hora,
+               left(m.copy, 300) as copy, m.enviado
+          from mensajes_parrilla m join dias_parrilla d on d.id = m.dia_id
+         order by d.fecha, m.hora, d.orden, m.orden`),
+    ]),
   ]);
-  const [productos, ventas, cobros] = cartera;
+  const [productos, compras, cobros] = cartera;
+  const [clasesFilas, muestras, mensajes] = clasesYParrilla;
   const nombreProducto = new Map(productos.map((p) => [p.id, p.nombre]));
 
   const hoy = hoyColombia();
@@ -193,7 +228,7 @@ export async function cargarComparativa(): Promise<DatosComparativa> {
 
     const config = VENTAS_POR_LANZAMIENTO[l.id];
     const serie = (tipo: TipoVenta | undefined) =>
-      armarVentas(l.fecha, tipo ?? { productos: [] }, { ventas, cobros, nombreProducto, hoy, estado });
+      armarVentas(l.fecha, tipo ?? { productos: [] }, { compras, cobros, nombreProducto, hoy, estado });
 
     return {
       id: l.id,
@@ -209,6 +244,11 @@ export async function cargarComparativa(): Promise<DatosComparativa> {
       plataformas: listaPlataformas,
       ventas: serie(config?.ventas),
       downsell: serie(config?.downsell),
+      clases: armarClases(
+        clasesFilas.filter((c) => c.lanzamiento_id === l.id),
+        muestras.filter((m) => m.lanzamiento_id === l.id),
+        mensajes.filter((m) => m.lanzamiento_id === l.id),
+      ),
     };
   });
 
@@ -303,7 +343,7 @@ function armarVentas(
   fechaLanzamiento: string,
   tipo: TipoVenta,
   contexto: {
-    ventas: FilaVentas[];
+    compras: FilaCompra[];
     cobros: FilaCobro[];
     nombreProducto: Map<string, string>;
     hoy: string;
@@ -312,20 +352,27 @@ function armarVentas(
 ): SerieVentas {
   const { hoy } = contexto;
   const cierre = tipo.cierre ?? null;
-  const ventas = contexto.ventas.filter((v) => tipo.productos.includes(v.producto_id));
-  const dentro = cierre ? ventas.filter((v) => v.fecha <= cierre) : ventas;
+  const compras = contexto.compras.filter((v) => tipo.productos.includes(v.producto_id));
+  const dentro = (cierre ? compras.filter((v) => v.fecha <= cierre) : compras).sort((a, b) =>
+    a.fecha === b.fecha ? (a.hora ?? '').localeCompare(b.hora ?? '') : a.fecha.localeCompare(b.fecha),
+  );
   const serie: SerieVentas = {
     // Un id que no está en Cartera se muestra tal cual, para notar el error.
     productos: tipo.productos.map((id) => contexto.nombreProducto.get(id) ?? id),
     cierre,
     cerrada: cierre ? hoy > cierre : contexto.estado === 'finalizado',
     puntos: [],
-    fueraDeVentana: ventas.reduce((s, v) => s + v.ventas, 0) - dentro.reduce((s, v) => s + v.ventas, 0),
+    compras: dentro.map((v) => ({
+      dia: diasEntre(fechaLanzamiento, v.fecha),
+      // Solo 'HH:MM' válidas: una hora mal escrita cuenta como sin hora.
+      hora: v.hora && /^\d{1,2}:\d{2}/.test(v.hora) ? v.hora.padStart(5, '0').slice(0, 5) : null,
+    })),
+    fueraDeVentana: compras.length - dentro.length,
   };
   if (dentro.length === 0) return serie;
 
   const ventasDia = new Map<string, number>();
-  for (const v of dentro) ventasDia.set(v.fecha, (ventasDia.get(v.fecha) ?? 0) + v.ventas);
+  for (const v of dentro) ventasDia.set(v.fecha, (ventasDia.get(v.fecha) ?? 0) + 1);
   // Los cobros de las compras fuera de ventana caen después del cierre, donde la serie ya terminó.
   const cobradoDia = new Map<string, number>();
   for (const c of contexto.cobros) {
@@ -353,6 +400,47 @@ function armarVentas(
     });
   }
   return serie;
+}
+
+/** 'H:MM' o 'HH:MM:SS' → 'HH:MM'. */
+const normalizarHora = (hora: string) => hora.trim().padStart(5, '0').slice(0, 5);
+
+/** Inicio legible de un copy de WhatsApp: sin marcas de formato ni saltos de línea. */
+function inicioCopy(copy: string | null): string {
+  const limpio = (copy ?? '').replace(/[*_~`]/g, '').replace(/\s+/g, ' ').trim();
+  if (limpio.length <= 90) return limpio;
+  return `${limpio.slice(0, 90).replace(/\s+\S*$/, '')}…`;
+}
+
+/**
+ * Cada clase con sus lecturas de asistencia y los copys de la parrilla de ese
+ * día (todas las etapas: consumo y compra se envían el mismo día). Incluye
+ * las clases que solo tienen lecturas aunque no estén en clases_lanzamiento.
+ */
+function armarClases(clases: FilaClase[], muestras: FilaMuestra[], mensajes: FilaMensaje[]): ClaseLanzamiento[] {
+  const numeros = [...new Set([...clases.map((c) => c.numero), ...muestras.map((m) => m.clase_numero)])].sort(
+    (a, b) => a - b,
+  );
+  return numeros.map((numero) => {
+    const fecha = clases.find((c) => c.numero === numero)?.fecha ?? null;
+    return {
+      numero,
+      fecha,
+      muestras: muestras
+        .filter((m) => m.clase_numero === numero)
+        .map((m) => ({ hora: normalizarHora(m.hora), youtube: m.youtube, zoom: m.zoom }))
+        .sort((a, b) => a.hora.localeCompare(b.hora)),
+      mensajes: fecha
+        ? mensajes
+            .filter((m) => m.fecha === fecha)
+            .map((m) => ({
+              hora: m.hora && /^\d{1,2}:\d{2}/.test(m.hora) ? normalizarHora(m.hora) : null,
+              inicio: inicioCopy(m.copy),
+              enviado: m.enviado,
+            }))
+        : [],
+    };
+  });
 }
 
 function estadoDe(l: FilaLanzamiento, hoy: string, tieneDatos: boolean): EstadoLanzamiento {
