@@ -7,9 +7,9 @@ import type { DatosComparativa } from '../lib/tipos';
 let datos: DatosComparativa | null = null;
 try {
   datos = await cargarComparativa();
-  // Las métricas se cargan una vez al día: 2 minutos de caché en el CDN
-  // bastan y evitan consultar la base en cada visita.
-  Astro.response.headers.set('Cache-Control', 'public, s-maxage=120, stale-while-revalidate=600');
+  // La página se actualiza sola cada 10 s desde /api/comparativa.json; la
+  // primera carga tampoco debe llegar más vieja que eso.
+  Astro.response.headers.set('Cache-Control', 'public, s-maxage=10, stale-while-revalidate=10');
 } catch (error) {
   console.error('[comparativa] no se pudieron leer los lanzamientos:', error);
   Astro.response.status = 503;
@@ -38,9 +38,15 @@ const hayDatos = !!datos?.lanzamientos.some(
       </div>
       {
         datos && (
-          <p class="w-full text-xs text-white/80 sm:w-auto">
-            Hoy: <span class="font-semibold text-white">{fmtFechaLarga(datos.hoy)}</span>
-          </p>
+          <div class="w-full space-y-1 text-xs text-white/80 sm:w-auto sm:text-right">
+            <p>
+              Hoy: <span class="font-semibold text-white">{fmtFechaLarga(datos.hoy)}</span>
+            </p>
+            <p class="inline-flex items-center gap-1.5" aria-live="off">
+              <span class="vivo size-2 rounded-full bg-[#4ade80]" aria-hidden="true" />
+              <span id="estado-vivo">En vivo</span>
+            </p>
+          </div>
         )
       }
     </div>

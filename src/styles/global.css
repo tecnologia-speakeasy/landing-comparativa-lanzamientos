@@ -82,6 +82,28 @@ button:not(:disabled) {
   @apply outline-2 outline-offset-2 outline-rosa;
 }
 
+/* Punto de "En vivo": late suave; en rojo si la última actualización falló. */
+.vivo {
+  animation: latido 2s ease-in-out infinite;
+}
+#estado-vivo[data-error='true'] {
+  color: #fecaca;
+}
+p:has(#estado-vivo[data-error='true']) .vivo {
+  background: #f87171;
+  animation: none;
+}
+@keyframes latido {
+  50% {
+    opacity: 0.35;
+  }
+}
+@media (prefers-reduced-motion: reduce) {
+  .vivo {
+    animation: none;
+  }
+}
+
 /* Deslizador del día de comparación. */
 input[type='range'].deslizador {
   accent-color: var(--color-morado);

@@ -1,8 +1,8 @@
 /**
  * Comparativa simple: el lanzamiento actual (fucsia) frente al pasado
- * (morado) en tres gráficas: registros, inversión y registros por fuente.
- * Todo se calcula en el navegador a partir del JSON que deja el servidor en
- * #datos-comparativa.
+ * (morado) en registros, inversión, fuentes, ventas y asistencia. Todo se
+ * calcula en el navegador a partir del JSON que deja el servidor en
+ * #datos-comparativa, y se refresca cada 10 s desde /api/comparativa.json.
  */
 import type { ChartConfiguration, ChartType, TooltipItem } from 'chart.js';
 import { sumarDias } from '../lib/fechas';
@@ -38,8 +38,79 @@ const MESES = [
 type Plataforma = 'youtube' | 'zoom';
 const SEMANA = ['Domingo', 'Lunes', 'Martes', 'Miércoles', 'Jueves', 'Viernes', 'Sábado'];
 
+/**
+ * Lo que la persona eligió en la página. Vive fuera de `iniciar` porque los
+ * datos se vuelven a pedir cada pocos segundos y la página se redibuja con
+ * ellos sin perder filtros, clase ni vista.
+ */
+const ui = {
+  /** Solo la primera vez se animan las gráficas; las actualizaciones son inmediatas. */
+  animar: true,
+  /** Filtro de ventas; `null` = sin filtro (todos los días y horas, aunque aparezcan días nuevos). */
+  filtroVentas: null as { diaDesde: string; diaHasta: string; horaDesde: string; horaHasta: string } | null,
+  clase: null as number | null,
+  vistaAsistencia: 'total' as Plataforma | 'total',
+  /** Ids de los lanzamientos ocultos en asistencia. */
+  ocultos: new Set<string>(),
+};
+
+/** Reemplaza el contenido solo si cambió: así una actualización no reinicia scroll, foco ni selectores abiertos. */
+const ultimoHtml = new WeakMap<HTMLElement, string>();
+function html(el: HTMLElement, contenido: string) {
+  if (ultimoHtml.get(el) === contenido) return;
+  ultimoHtml.set(el, contenido);
+  el.innerHTML = contenido;
+}
+
 const nodoDatos = document.getElementById('datos-comparativa');
-if (nodoDatos?.textContent) iniciar(JSON.parse(nodoDatos.textContent) as DatosComparativa);
+if (nodoDatos?.textContent) {
+  iniciar(JSON.parse(nodoDatos.textContent) as DatosComparativa);
+  ui.animar = false;
+  actualizarCada(10_000);
+}
+
+/**
+ * Vuelve a pedir los datos y redibuja. Se pausa con la pestaña oculta y, si
+ * una petición falla, se conserva lo último que se mostró.
+ */
+function actualizarCada(ms: number) {
+  const estado = document.getElementById('estado-vivo');
+  let ultima = Date.now();
+  let error = false;
+  const pintarEstado = () => {
+    if (!estado) return;
+    const hace = Math.round((Date.now() - ultima) / 1000);
+    estado.textContent = error ? `Sin conexión · reintentando` : `En vivo · actualizado hace ${hace} s`;
+    estado.dataset.error = String(error);
+  };
+
+  let enCurso = false;
+  async function actualizar() {
+    if (document.hidden || enCurso) return;
+    enCurso = true;
+    try {
+      const res = await fetch('/api/comparativa.json', { cache: 'no-store' });
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      iniciar((await res.json()) as DatosComparativa);
+      ultima = Date.now();
+      error = false;
+    } catch (e) {
+      console.warn('[comparativa] no se pudo actualizar:', e);
+      error = true;
+    } finally {
+      enCurso = false;
+      pintarEstado();
+    }
+  }
+
+  setInterval(actualizar, ms);
+  setInterval(pintarEstado, 1000);
+  // Al volver a la pestaña se actualiza enseguida, sin esperar el siguiente ciclo.
+  document.addEventListener('visibilitychange', () => {
+    if (!document.hidden) actualizar();
+  });
+  pintarEstado();
+}
 
 function iniciar(datos: DatosComparativa) {
   // Los lanzamientos llegan en orden cronológico: el último con datos es el
@@ -78,7 +149,7 @@ function iniciar(datos: DatosComparativa) {
   // Leyenda: qué color es cada lanzamiento
   // ------------------------------------------------------------------------
 
-  $('#leyenda').innerHTML = [...lista]
+  html($('#leyenda'), [...lista]
     .reverse()
     .map(
       (l) => `
@@ -94,7 +165,7 @@ function iniciar(datos: DatosComparativa) {
           </div>
         </div>`,
     )
-    .join('');
+    .join(''));
 
   // ------------------------------------------------------------------------
   // Registros e inversión: líneas acumuladas alineadas a la Clase 1
@@ -178,7 +249,7 @@ function iniciar(datos: DatosComparativa) {
         },
       },
     };
-    pintar($<HTMLCanvasElement>(opciones.canvas), config);
+    pintar($<HTMLCanvasElement>(opciones.canvas), config, ui.animar);
   }
 
   lineas({
@@ -189,9 +260,9 @@ function iniciar(datos: DatosComparativa) {
   });
 
   const monedas = new Set(lista.map((l) => l.moneda));
-  if (monedas.size > 1) {
-    $('[data-sub="inversion"]').textContent += ' Atención: los lanzamientos usan monedas distintas.';
-  }
+  $('[data-sub="inversion"]').textContent =
+    'Inversión acumulada en pauta, día a día.' +
+    (monedas.size > 1 ? ' Atención: los lanzamientos usan monedas distintas.' : '');
   lineas({
     canvas: '#g-inversion',
     valores: (l) => new Map(l.inversion.puntos.map((p) => [p.dia, p.acumulado])),
@@ -259,7 +330,7 @@ function iniciar(datos: DatosComparativa) {
         etiquetasBarras: { formato: (v) => fmtReg(v) },
       },
     },
-  });
+  }, ui.animar);
 
   iniciarAsistencia();
 
@@ -283,16 +354,27 @@ function iniciar(datos: DatosComparativa) {
       .reverse()
       .map((l) => fmtFechaCorta(fechaDe(l, d)))
       .join(' / ')}</option>`;
-  campo('diaDesde').innerHTML = diasVentas.map(opcionDia).join('');
-  campo('diaHasta').innerHTML = diasVentas.map(opcionDia).join('');
-  campo('horaDesde').innerHTML = HORAS.map((h) => `<option value="${h}">${dosCifras(h)}:00</option>`).join('');
-  campo('horaHasta').innerHTML = HORAS.map((h) => `<option value="${h}">${dosCifras(h)}:59</option>`).join('');
+  html(campo('diaDesde'), diasVentas.map(opcionDia).join(''));
+  html(campo('diaHasta'), diasVentas.map(opcionDia).join(''));
+  html(campo('horaDesde'), HORAS.map((h) => `<option value="${h}">${dosCifras(h)}:00</option>`).join(''));
+  html(campo('horaHasta'), HORAS.map((h) => `<option value="${h}">${dosCifras(h)}:59</option>`).join(''));
 
+  /** Sin filtro elegido: todos los días (incluido uno nuevo que acabe de aparecer) y todas las horas. */
   const valoresIniciales = () => {
     campo('diaDesde').value = String(diasVentas[0]);
     campo('diaHasta').value = String(diasVentas.at(-1));
     campo('horaDesde').value = '0';
     campo('horaHasta').value = '23';
+  };
+  /** Vuelve a poner el filtro elegido; si un día ya no está entre las opciones, usa el extremo. */
+  const aplicarFiltro = () => {
+    valoresIniciales();
+    const f = ui.filtroVentas;
+    if (!f) return;
+    for (const [nombre, valor] of Object.entries(f)) {
+      const select = campo(nombre);
+      if ([...select.options].some((o) => o.value === valor)) select.value = valor;
+    }
   };
 
   function pintarVentas(animar: boolean) {
@@ -406,16 +488,27 @@ function iniciar(datos: DatosComparativa) {
     );
   }
 
-  form.addEventListener('change', () => pintarVentas(true));
-  form.addEventListener('submit', (e) => e.preventDefault());
-  form.addEventListener('reset', (e) => {
+  // Manejadores como propiedad (no addEventListener): cada actualización los
+  // reemplaza en vez de acumularlos.
+  form.onchange = () => {
+    ui.filtroVentas = {
+      diaDesde: campo('diaDesde').value,
+      diaHasta: campo('diaHasta').value,
+      horaDesde: campo('horaDesde').value,
+      horaHasta: campo('horaHasta').value,
+    };
+    pintarVentas(true);
+  };
+  form.onsubmit = (e) => e.preventDefault();
+  form.onreset = (e) => {
     e.preventDefault();
+    ui.filtroVentas = null;
     valoresIniciales();
     pintarVentas(true);
-  });
+  };
 
-  valoresIniciales();
-  pintarVentas(true);
+  aplicarFiltro();
+  pintarVentas(ui.animar);
 
   // ------------------------------------------------------------------------
   // Asistencia y mensajería: cada clase, con sus lecturas y los copys del día
@@ -435,7 +528,7 @@ function iniciar(datos: DatosComparativa) {
     /** Qué se mira: la suma de las dos plataformas o una sola. */
     type VistaAsistencia = Plataforma | 'total';
     const NOMBRE: Record<VistaAsistencia, string> = { total: 'Total', youtube: 'YouTube', zoom: 'Zoom' };
-    let vista: VistaAsistencia = 'total';
+    let vista: VistaAsistencia = ui.vistaAsistencia;
     /** Conectados en una lectura según la vista; el total suma lo que haya de cada plataforma. */
     const valor = (m: MuestraAsistencia, v = vista): number | null => {
       if (v !== 'total') return m[v];
@@ -453,13 +546,14 @@ function iniciar(datos: DatosComparativa) {
       return `${SEMANA[new Date(Date.UTC(a, m - 1, d)).getUTCDay()].slice(0, 3)} ${fmtFechaCorta(iso)}`;
     };
 
-    let seleccionada = numeros[0];
+    let seleccionada = ui.clase != null && numeros.includes(ui.clase) ? ui.clase : numeros[0];
     /** Lanzamientos que se ven en esta sección; siempre queda al menos uno. */
-    const visibles = new Set(lista);
+    const visibles = new Set(lista.filter((l) => !ui.ocultos.has(l.id)));
+    if (visibles.size === 0) lista.forEach((l) => visibles.add(l));
     const todos = lista;
 
     function renderVisibles() {
-      $('#ver-lanzamientos').innerHTML = [...todos]
+      html($('#ver-lanzamientos'), [...todos]
         .reverse()
         .map((l) => {
           const activo = visibles.has(l);
@@ -473,12 +567,12 @@ function iniciar(datos: DatosComparativa) {
               ${esc(corto(l))}
             </button>`;
         })
-        .join('');
+        .join(''));
     }
 
     function renderBotones() {
       const lista = todos.filter((l) => visibles.has(l));
-      $('#clases').innerHTML = numeros
+      html($('#clases'), numeros
         .map((n) => {
           const activa = n === seleccionada;
           const picos = [...lista]
@@ -499,7 +593,7 @@ function iniciar(datos: DatosComparativa) {
               <span class="flex flex-wrap gap-x-2 text-[11px] font-semibold text-tinta-2" title="Pico de asistencia (${NOMBRE[vista]})">${picos}</span>
             </button>`;
         })
-        .join('');
+        .join(''));
     }
 
     function renderClase(animar: boolean) {
@@ -510,7 +604,7 @@ function iniciar(datos: DatosComparativa) {
       const ultima = horas.at(-1);
 
       // Picos de la clase.
-      $('#picos').innerHTML = [...lista]
+      html($('#picos'), [...lista]
         .reverse()
         .map((l) => {
           const c = claseDe(l, seleccionada);
@@ -526,7 +620,7 @@ function iniciar(datos: DatosComparativa) {
               <span>${enviados} copy${enviados === 1 ? '' : 's'}</span>
             </p>`;
         })
-        .join('');
+        .join(''));
 
       // Posición de un copy en el eje de horas (con decimales entre dos lecturas).
       const posicion = (hora: string) => {
@@ -616,7 +710,7 @@ function iniciar(datos: DatosComparativa) {
 
       // Línea de tiempo: lecturas y copys intercalados por hora, un lanzamiento por columna.
       $('#linea-tiempo').classList.toggle('lg:grid-cols-2', lista.length > 1);
-      $('#linea-tiempo').innerHTML = [...lista]
+      html($('#linea-tiempo'), [...lista]
         .reverse()
         .map((l) => {
           const c = claseDe(l, seleccionada);
@@ -672,53 +766,56 @@ function iniciar(datos: DatosComparativa) {
               }
             </div>`;
         })
-        .join('');
+        .join(''));
     }
 
-    $('#clases').addEventListener('click', (e) => {
+    // Manejadores como propiedad: cada actualización los reemplaza en vez de acumularlos.
+    $('#clases').onclick = (e) => {
       const boton = (e.target as HTMLElement).closest<HTMLButtonElement>('[data-clase]');
       if (!boton) return;
-      seleccionada = Number(boton.dataset.clase);
+      seleccionada = ui.clase = Number(boton.dataset.clase);
       renderBotones();
       renderClase(true);
       $<HTMLButtonElement>(`[data-clase="${seleccionada}"]`).focus();
-    });
+    };
 
     const controlPlataforma = $('#plataforma');
     const renderPlataforma = () =>
       controlPlataforma.querySelectorAll<HTMLButtonElement>('button').forEach((b) => {
         b.setAttribute('aria-pressed', String(b.dataset.valor === vista));
       });
-    controlPlataforma.addEventListener('click', (e) => {
+    controlPlataforma.onclick = (e) => {
       const boton = (e.target as HTMLElement).closest<HTMLButtonElement>('button[data-valor]');
       if (!boton) return;
-      vista = boton.dataset.valor as VistaAsistencia;
+      vista = ui.vistaAsistencia = boton.dataset.valor as VistaAsistencia;
       renderPlataforma();
       renderBotones();
       renderClase(true);
-    });
+    };
 
-    $('#ver-lanzamientos').addEventListener('click', (e) => {
+    $('#ver-lanzamientos').onclick = (e) => {
       const boton = (e.target as HTMLElement).closest<HTMLButtonElement>('[data-ver]');
       const l = todos.find((x) => x.id === boton?.dataset.ver);
       if (!l) return;
       if (visibles.has(l)) {
         if (visibles.size === 1) return; // siempre queda al menos uno
         visibles.delete(l);
+        ui.ocultos.add(l.id);
       } else {
         visibles.add(l);
+        ui.ocultos.delete(l.id);
       }
       renderVisibles();
       renderBotones();
       renderClase(true);
       $<HTMLButtonElement>(`[data-ver="${l.id}"]`).focus();
-    });
+    };
 
     // Con un solo lanzamiento no hay nada que activar o desactivar.
     $('#ver-lanzamientos').hidden = todos.length < 2;
     renderVisibles();
     renderPlataforma();
     renderBotones();
-    renderClase(true);
+    renderClase(ui.animar);
   }
 }
